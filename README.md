@@ -21,15 +21,13 @@ Open http://127.0.0.1:8050 in your browser.
 
 ## Data
 
-The dashboard reads the CSV from `stock_tweets.csv` in the project root. If it is not
-found, it falls back to `D:\Projects\school\Data-analysis\stock_tweets.csv`. It attempts
+The dashboard reads the CSV from `stock_tweets.csv` in the project root. It attempts
 to detect common column names for dates, prices, volume, and sentiment. If the file
 contains tweet text, the app computes TextBlob and VADER sentiment metrics.
 
 ## Notebook
 
-Open `notebooks/data_exploration.ipynb` to load the CSV, preview rows, and inspect
-the inferred schema.
+Open `notebooks/data_exploration.ipynb` to check the analysis as well
 
 ## Notes
 
