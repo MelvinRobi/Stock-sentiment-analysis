@@ -1,208 +1,259 @@
-# Stock Sentiment Analysis Dashboard
+# CT Sentiment Analyzer
 
-A comprehensive web application that combines financial market data with Twitter sentiment analysis to provide real-time insights into stock performance and public opinion trends.
+A comprehensive sentiment analysis dashboard built with **Dash** that analyzes sentiment in CSV datasets using multiple NLP techniques. The application combines **TextBlob**, **NLTK VADER**, and **Transformer-based** models for accurate sentiment classification, with interactive visualizations and real-time data exploration capabilities.
 
-## 🚀 Features
+## Overview
 
-### **Sentiment Analysis**
-- **Dual Engine**: Combines TextBlob and VADER sentiment analysis
-- **Real-time Processing**: Analyzes tweet sentiment on-the-fly
-- **Classification**: Automatic categorization into Positive/Neutral/Negative
-- **Scoring**: Combined sentiment scores with confidence metrics
+CT Sentiment Analyzer is a production-ready web application designed to:
+- Analyze sentiment across large text datasets with multiple algorithms
+- Visualize sentiment trends, distributions, and patterns
+- Compare sentiment scores from different NLP models
+- Support custom CSV uploads from local files or Kaggle datasets
+- Provide detailed metrics and moving averages for temporal analysis
 
-### **Financial Analysis**
-- **Price Tracking**: Stock prices with 7/14/30-day moving averages
-- **Volume Analysis**: Trading volume patterns and trends
-- **Returns Calculation**: Daily returns and volatility metrics
-- **Correlation Analysis**: Sentiment vs. price movement relationships
+## Features
 
-### **Interactive Visualizations**
-- **Sentiment Distribution**: Real-time sentiment category breakdowns
-- **Timeline Analysis**: Daily sentiment trends and patterns
-- **Price Charts**: Interactive stock charts with sentiment overlay
-- **Activity Metrics**: Tweet volume and engagement tracking
-- **Top Terms**: Most frequently mentioned terms in tweets
-- **Scatter Analysis**: Polarity vs. subjectivity relationships
+### Core Functionality
+- **Multi-Model Sentiment Analysis**: Combines TextBlob polarity, NLTK VADER intensity scores, and transformer-based sentiment models
+- **Flexible Data Import**: Load CSV files from local storage or dedicated Kaggle folder
+- **Interactive Dashboard**: Real-time filtering, searching, and chart interactions using Plotly
+- **Sentiment Visualization**: 
+  - Distribution charts (positive, neutral, negative)
+  - Time-series trends with moving averages (7-day, 14-day, 30-day)
+  - Keyword-specific sentiment breakdown
+  - Comparative sentiment analysis
+- **Performance Optimization**: Caching and efficient data loading for datasets up to 8,000+ rows
+- **Dark Theme UI**: Modern, professional black/white interface for extended viewing
 
-### **Data Intelligence**
-- **Multi-ticker Support**: Compare sentiment across different stocks
-- **Tweet Tables**: Top positive, negative, and recent tweets
-- **Auto-detection**: Smart column detection for various data formats
-- **Time Series Processing**: Automatic date normalization and sorting
+### Sentiment Models
+1. **TextBlob**: Fast polarity analysis (-1 to 1 scale)
+2. **NLTK VADER**: Valence Aware Dictionary and sEntiment Reasoner, optimized for social media
+3. **Transformer Models**: Hugging Face transformers for state-of-the-art accuracy
 
-## 📋 Project Structure
+## Project Structure
 
 ```
-Stock-sentiment-analysis/
-├── app.py                    # Main Dash application (859 lines)
-├── requirements.txt          # Python dependencies
-├── stock_tweets.csv         # Dataset (~18MB)
-├── Procfile                 # Heroku deployment config
-├── plotly-cloud.toml        # Plotly cloud deployment
-├── README.md               # This file
-├── notebooks/
-│   └── Stock_sentiment.ipynb  # Analysis notebook (~15MB)
-└── venv/                   # Virtual environment
+app.py                           # Main Dash application entrypoint
+requirements.txt                 # Python dependencies and versions
+plotly-cloud.toml               # Plotly cloud configuration
+Procfile                        # Deployment configuration for Heroku/cloud
+
+sentiment_dashboard/            # Dashboard module
+├── ui.py                       # Dash layout and UI components
+├── callbacks.py                # Interactive callbacks and logic
+├── config.py                   # Configuration constants
+├── data_loader.py              # CSV loading and data discovery
+└── __init__.py
+
+sentiment_training/             # ML training and preprocessing utilities
+├── __init__.py
+├── config.py                   # Training configuration
+├── exploration.py              # Data exploration utilities
+├── io.py                       # File I/O operations
+├── labels.py                   # Label management
+├── pipeline.py                 # Training pipeline
+├── preprocess.py               # Text preprocessing
+└── README.md
+
+transformer_sentiment.py         # Transformer model inference wrapper
+notebooks/
+├── Stock_sentiment.ipynb       # Analysis and exploration notebook
+
+archive/                        # Archived data and legacy files
+├── README.md
+├── exploring_data.ipynb        # Original data exploration
+├── train_data.csv              # Training dataset
+├── test_data.csv               # Test dataset
+├── vocab.py                    # Vocabulary utilities
+└── vocab.json                  # Vocabulary mappings
+
+data/
+└── kaggle/                     # Custom Kaggle datasets (empty by default)
+
+docs/
+└── KAGGLE_DATASET.md           # Kaggle data import guide
+
+notebooks/                      # Jupyter notebooks for analysis
+└── Stock_sentiment.ipynb
 ```
 
-## 🛠️ Technology Stack
+## Installation & Setup
 
-- **Backend**: Python 3.x
-- **Web Framework**: Dash with Plotly
-- **UI Components**: Dash Bootstrap Components
-- **Data Processing**: Pandas, NumPy
-- **Sentiment Analysis**: NLTK (VADER), TextBlob
-- **Machine Learning**: Scikit-learn
-- **Visualization**: Plotly, Plotly Express
-- **Deployment**: Gunicorn, Heroku/Plotly Cloud
+### Prerequisites
+- Python 3.8+
+- pip (Python package manager)
+- Virtual environment support
 
-## 📊 Data Requirements
+### Quick Start
 
-The application expects a CSV file (`stock_tweets.csv`) with the following structure:
+1. **Clone/Navigate to the project**:
+   ```bash
+   cd /path/to/Stock-sentiment-analysis
+   ```
 
-### **Required Columns (auto-detected)**
-- **Date**: `date`, `timestamp`, `datetime`, `created_at`, `createdat`
-- **Tweet Text**: `tweet`, `text`, `full_text`
-- **Stock Symbol**: `ticker`, `symbol`, `stock name`, `stock`, `company`
-- **Price**: `adj_close`, `close`, `last`, `price`
-- **Volume**: `volume`, `vol`
+2. **Create and activate virtual environment**:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
 
-### **Sample Data Format**
-```csv
-date,tweet,ticker,close,volume
-2023-01-01,"Tesla stock is amazing! $TSLA",TSLA,150.25,1000000
-2023-01-01,"Bad day for Apple investors",AAPL,125.50,800000
-```
+3. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+   This installs:
+   - `dash` & `dash-bootstrap-components`: Web framework
+   - `pandas` & `numpy`: Data manipulation
+   - `plotly`: Interactive visualizations
+   - `nltk`: VADER sentiment analysis
+   - `textblob`: TextBlob polarity scores
+   - `transformers` & `torch`: Transformer models
+   - `gunicorn`: Production server
 
-## 🚀 Quick Start
+4. **Run the application**:
+   ```bash
+   python app.py
+   ```
 
-### **1. Environment Setup**
+5. **Access the dashboard**:
+   - Open **http://127.0.0.1:8050** in your browser
+   - The app will auto-detect available CSV files and load a default dataset
+
+## Usage Guide
+
+### Loading Data
+
+#### Using Built-in CSV Files
+- `stock_tweets.csv`: Pre-loaded tweets about stocks
+- `Stocks.csv`: Stock-related data (if present)
+- Any root-level CSV file
+
+#### Adding Kaggle Datasets
+
+1. **Download from Kaggle**:
+   - Visit [Kaggle Datasets](https://www.kaggle.com/datasets)
+   - Download any CSV file (e.g., product reviews, tweets, comments)
+
+2. **Import into the app**:
+   - Copy the CSV file to `data/kaggle/` directory
+   - Restart the application: `python app.py`
+   - In the dashboard: **Data source → CSV file**
+   - **Dataset dropdown → Kaggle · [filename]**
+   - Click **Run Analysis**
+
+3. **Default loading**:
+   - The app prioritizes `Stocks.csv` if present
+   - Falls back to `stock_tweets.csv`
+   - Then loads the first file alphabetically
+   - You can override via the UI dropdown
+
+#### Custom Column Detection
+The app auto-detects text columns for analysis:
+- **Primary text column**: Searches for "text", "tweet", "comment", "content", "message"
+- **Combine mode**: Merges multiple text columns if primary not found
+- **Edit detection**: Modify `sentiment_dashboard/data_loader.py`:
+  ```python
+  TEXT_COLUMN_CANDIDATES = ["text", "content", "tweet", "description"]
+  COMBINE_COLUMN_BLOCK = ["id", "user", "timestamp"]  # columns to skip
+  ```
+
+### Dashboard Features
+
+#### Analysis Controls
+- **Data Source**: Choose between CSV file or real-time StockTwits stream
+- **Dataset Selector**: Pick which CSV to analyze
+- **Keyword Filter**: Search for specific terms in the text
+- **Sentiment Model**: Toggle between TextBlob, VADER, or Transformer
+- **Run Analysis**: Process and visualize the selected data
+
+#### Visualizations
+- **Sentiment Distribution**: Pie chart showing positive/neutral/negative breakdown
+- **Time Series**: Line chart with configurable moving averages (7/14/30 days)
+- **Top Keywords**: Bar chart of most common words by sentiment
+- **Data Table**: Searchable, paginated view of all records with scores
+
+#### Performance Metrics
+- Total records analyzed
+- Average sentiment score
+- Distribution percentages
+- Processing time
+
+## Advanced Configuration
+
+### Training Pipeline (Archive Data)
+
+The `sentiment_training/` module supports classifier training:
+
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd Stock-sentiment-analysis
+# Explore training data
+python -m sentiment_training.exploration --train-nrows 50000
 
-# Create virtual environment
-python -m venv venv
-
-# Activate virtual environment
-# Windows:
-venv\Scripts\activate
-# macOS/Linux:
-source venv/bin/activate
+# Run full pipeline
+python -m sentiment_training.pipeline
 ```
 
-### **2. Install Dependencies**
-```bash
-pip install -r requirements.txt
-```
+See `archive/README.md` for detailed training documentation.
 
-### **3. Prepare Data**
-- Place your `stock_tweets.csv` file in the project root
-- The app will auto-detect column names
-- First run will download required NLTK data automatically
+### Transformer Models
 
-### **4. Run the Application**
-```bash
-python app.py
-```
+Edit `transformer_sentiment.py` to:
+- Change the model: `model_name = "distilbert-base-uncased-finetuned-sst-2-english"`
+- Adjust batch size for memory constraints
+- Enable GPU acceleration with `device='cuda'`
 
-### **5. Access the Dashboard**
-Open your browser and navigate to: **http://127.0.0.1:8050**
+### Column Customization
 
-## 📖 Usage Guide
-
-### **Dashboard Navigation**
-1. **Main Dashboard**: Overview with key metrics and charts
-2. **Sentiment Analysis**: Detailed sentiment breakdowns and trends
-3. **Financial Charts**: Stock prices, volume, and returns
-4. **Tweet Analysis**: Top tweets and term frequency analysis
-5. **Comparison Tools**: Multi-ticker sentiment comparison
-
-### **Key Metrics Displayed**
-- **Latest Sentiment**: Current sentiment score
-- **Tweet Volume**: Total number of tweets analyzed
-- **Average Polarity**: Overall sentiment polarity
-- **Positive/Negative Ratio**: Sentiment distribution percentages
-- **Stock Performance**: Price changes and volatility
-- **Correlation Metrics**: Sentiment vs. price relationships
-
-### **Interactive Features**
-- **Date Range Selection**: Filter data by time period
-- **Ticker Selection**: Analyze specific stocks
-- **Sentiment Filters**: Focus on positive/negative tweets
-- **Export Functionality**: Download charts and data
-- **Real-time Updates**: Dynamic chart updates
-
-## 🔧 Configuration
-
-### **Customizing Column Detection**
-Edit the candidate lists in `app.py` if your CSV uses different column names:
+Edit `sentiment_dashboard/data_loader.py`:
 
 ```python
-# Example: Custom date column detection
-date_col = _find_column(columns, [
-    "date",
-    "timestamp", 
-    "datetime",
-    "created_at",
-    "createdat",
-    "your_custom_date_column",  # Add your column name here
-])
+# Primary text column search patterns
+TEXT_COLUMN_CANDIDATES = [
+    "text", "tweet", "comment", "content", "message", "body"
+]
+
+# Columns to exclude when auto-combining
+COMBINE_COLUMN_BLOCK = [
+    "id", "timestamp", "user_id", "username", "date"
+]
 ```
 
-### **Sentiment Thresholds**
-Adjust sentiment classification thresholds:
+## API & Callbacks
 
+### Sentiment Scoring
 ```python
-def get_final_sentiment(combined_score):
-    if combined_score >= 0.05:    # Positive threshold
-        return "Positive"
-    if combined_score <= -0.05:   # Negative threshold
-        return "Negative"
-    return "Neutral"
+from transformer_sentiment import score_texts
+
+scores = score_texts(texts=['I love this!', 'Terrible experience'])
+# Returns: [{'positive': 0.99, 'negative': 0.01}, ...]
 ```
 
-### **Moving Average Windows**
-Modify MA calculation periods:
-
+### Data Loading
 ```python
-MA_WINDOWS = (7, 14, 30)  # 7-day, 14-day, 30-day moving averages
+from sentiment_dashboard.data_loader import discover_csv_filenames, resolve_dataset_path
+
+files = discover_csv_filenames()  # Discover all available CSVs
+path = resolve_dataset_path("data/kaggle/my_data.csv")  # Resolve file path
 ```
 
-## 📓 Analysis Notebook
+## Deployment
 
-### **Exploratory Data Analysis**
-Open `notebooks/Stock_sentiment.ipynb` for:
-- **Data Profiling**: Comprehensive dataset analysis
-- **Sentiment Deep Dive**: Detailed sentiment analysis
-- **Visualization Gallery**: Extended chart collection
-- **Statistical Analysis**: Correlations and trends
-- **Model Testing**: Sentiment model performance
+### Heroku Deployment
 
-### **Notebook Contents**
-- **Data Loading and Preprocessing**
-- **Sentiment Analysis Pipeline**
-- **Financial Metrics Calculation**
-- **Advanced Visualizations**
-- **Statistical Tests and Insights**
+1. **Setup Heroku CLI** and authenticate
+2. **Create Procfile** (included):
+   ```
+   web: gunicorn app:server
+   ```
+3. **Deploy**:
+   ```bash
+   git push heroku main
+   ```
 
-## 🚀 Deployment
+### Docker Deployment
 
-### **Heroku Deployment**
-```bash
-# Install Heroku CLI
-heroku login
-heroku create your-app-name
-git push heroku main
-```
-
-### **Plotly Cloud Deployment**
-The `plotly-cloud.toml` file contains deployment configuration for Plotly's cloud platform.
-
-### **Docker Deployment** (Optional)
+Create `Dockerfile`:
 ```dockerfile
-FROM python:3.9-slim
+FROM python:3.10-slim
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
@@ -210,85 +261,59 @@ COPY . .
 CMD ["gunicorn", "app:server"]
 ```
 
-## 🔍 Troubleshooting
-
-### **Common Issues**
-
-**1. NLTK Data Missing**
+Build and run:
 ```bash
-# Download manually if auto-download fails
-python -c "import nltk; nltk.download('vader_lexicon'); nltk.download('punkt')"
+docker build -t ct-sentiment .
+docker run -p 8050:8050 ct-sentiment
 ```
 
-**2. Column Detection Fails**
-- Verify your CSV has the expected columns
-- Check for exact column name matches
-- Add custom column names to the candidate lists
+## Troubleshooting
 
-**3. Memory Issues with Large Datasets**
-- Filter data by date range
-- Use data sampling for initial testing
-- Consider using Dask for very large datasets
+### CSV Not Appearing in Dropdown
+- Ensure file is in root directory, `data/kaggle/`, or `archive/`
+- Restart the application
+- Check file is valid CSV with readable columns
 
-**4. Port Already in Use**
-```bash
-# Run on different port
-python app.py --port 8051
-```
+### Sentiment Scores All Zero/Same
+- Verify text column detection in data_loader.py
+- Check CSV has actual text data (not empty/null)
+- Run `python app.py` with verbose logging
 
-### **Performance Optimization**
-- Use data sampling for development
-- Implement caching for repeated analyses
-- Consider database integration for production
-- Optimize sentiment analysis with parallel processing
+### Performance Issues with Large Files
+- Limit rows: Modify `MAX_ROWS_NO_KEYWORD = 8000` in app.py
+- Use keyword filter to reduce dataset size
+- Switch to TextBlob (faster) instead of Transformer model
 
-## 📈 API Integration
+### Missing NLTK Data
+- The app auto-downloads VADER lexicon on first run
+- If error persists: `python -m nltk.downloader vader_lexicon`
 
-### **Twitter API Integration**
-For real-time data, integrate with Twitter API:
-```python
-# Example Twitter API integration
-import tweepy
-# Add your API keys and streaming logic
-```
+## Dependencies
 
-### **Stock Market APIs**
-Enhance with real-time market data:
-- Alpha Vantage
-- Yahoo Finance
-- IEX Cloud
-- Polygon.io
+See `requirements.txt` for full list. Key packages:
+- `dash==2.x`: Web framework
+- `plotly==5.x`: Visualization
+- `pandas>=1.3`: Data manipulation
+- `nltk>=3.6`: VADER sentiment
+- `textblob>=0.17`: TextBlob sentiment
+- `transformers>=4.20`: Transformer models
+- `torch>=1.10`: Deep learning (CPU/GPU)
 
-## 🤝 Contributing
+## Contributing
 
-### **Development Setup**
-```bash
-# Clone and setup development environment
-git clone <repository-url>
-cd Stock-sentiment-analysis
-python -m venv venv
-source venv/bin/activate  # or venv\Scripts\activate on Windows
-pip install -r requirements.txt
-pip install -r requirements-dev.txt  # if available
-```
+To extend the sentiment analysis:
 
-### **Code Style**
-- Follow PEP 8 guidelines
-- Use type hints where applicable
-- Add docstrings to functions
-- Include unit tests for new features
+1. **Add new sentiment models**: Implement in `transformer_sentiment.py`
+2. **Custom visualizations**: Add charts in `sentiment_dashboard/ui.py`
+3. **Preprocessing improvements**: Enhance `sentiment_training/preprocess.py`
+4. **Testing**: Add tests in dedicated `tests/` directory
 
-## 📄 License
+## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+This project is provided as-is for educational and commercial use.
 
-## 📞 Support
+## Support
 
-For questions, issues, or contributions:
-- Create an issue on GitHub
-- Check the troubleshooting section
-- Review the analysis notebook for examples
+For issues, questions, or feature requests, please refer to the documentation in `docs/` or review the code comments.
 
----
-
-**Note**: This application is designed for educational and research purposes. Financial decisions should not be based solely on sentiment analysis from social media.
+After **replacing** a CSV on disk with the same path, restart the app to clear the parse cache.

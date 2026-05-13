@@ -1,10 +1,12 @@
 from collections import Counter
+from functools import lru_cache
 from pathlib import Path
 import re
+import zipfile
 
 import dash
 import dash_bootstrap_components as dbc
-from dash import dash_table, dcc, html
+from dash import Input, Output, State, dash_table, dcc, html
 import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import pandas as pd
@@ -13,12 +15,57 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from textblob import TextBlob
 
-DATA_PATHS = [
-    Path(__file__).resolve().with_name("stock_tweets.csv"),
-]
+from transformer_sentiment import score_texts
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+DATA_KAGGLE_DIR = PROJECT_ROOT / "data" / "kaggle"
+ARCHIVE_DIR = PROJECT_ROOT / "archive"
+
+MAX_ROWS_NO_KEYWORD = 8000
+
 MA_WINDOWS = (7, 14, 30)
 SENTIMENT_ORDER = ["Positive", "Neutral", "Negative"]
 TOKEN_PATTERN = re.compile(r"[A-Za-z]{2,}")
+
+
+def discover_csv_filenames() -> list[str]:
+    items: list[str] = []
+    for p in sorted(PROJECT_ROOT.glob("*.csv")):
+        items.append(p.name)
+    if DATA_KAGGLE_DIR.is_dir():
+        for p in sorted(DATA_KAGGLE_DIR.glob("*.csv")):
+            items.append(p.relative_to(PROJECT_ROOT).as_posix())
+    if ARCHIVE_DIR.is_dir():
+        for p in sorted(ARCHIVE_DIR.glob("*.csv")):
+            items.append(p.relative_to(PROJECT_ROOT).as_posix())
+    return sorted(set(items), key=lambda s: s.lower())
+
+
+def resolve_dataset_path(dataset_value: str) -> Path:
+    raw = Path(dataset_value)
+    if raw.is_file():
+        return raw.resolve()
+    candidate = (PROJECT_ROOT / dataset_value).resolve()
+    if candidate.is_file():
+        return candidate
+    by_name = (PROJECT_ROOT / raw.name).resolve()
+    if by_name.is_file():
+        return by_name
+    return candidate
+
+
+def dataset_dropdown_options(csv_filenames: list[str]) -> list[dict]:
+    out: list[dict] = []
+    for f in csv_filenames:
+        norm = f.replace("\\", "/")
+        if norm.startswith("data/kaggle/"):
+            label = f"Kaggle · {Path(f).name}"
+        elif norm.startswith("archive/"):
+            label = f"Archive · {Path(f).name}"
+        else:
+            label = Path(f).name
+        out.append({"label": label, "value": f})
+    return out
 
 
 def _find_column(columns, candidates):
@@ -44,6 +91,14 @@ def _format_number(value):
     return f"{value:,.2f}"
 
 
+def _purge_nltk_zip(resource_path: str) -> None:
+    rel = Path(*resource_path.split("/"))
+    for root in nltk.data.path:
+        candidate = Path(root) / rel
+        if candidate.is_file():
+            candidate.unlink()
+
+
 def ensure_nltk_data():
     resources = [
         ("sentiment/vader_lexicon.zip", "vader_lexicon"),
@@ -54,6 +109,9 @@ def ensure_nltk_data():
             nltk.data.find(resource_path)
         except LookupError:
             nltk.download(resource_name)
+        except zipfile.BadZipFile:
+            _purge_nltk_zip(resource_path)
+            nltk.download(resource_name, force=True)
 
 
 def clean_text(text):
@@ -74,66 +132,120 @@ def get_final_sentiment(combined_score):
     return "Neutral"
 
 
-def get_data_path():
-    for path in DATA_PATHS:
-        if path.exists():
-            return path
-    return DATA_PATHS[0]
-
-
-def load_data():
-    data_path = get_data_path()
-    if not data_path.exists():
-        return None, None, data_path
-
-    df = pd.read_csv(data_path)
+@lru_cache(maxsize=8)
+def _load_csv_cached(path_str: str) -> tuple[pd.DataFrame, str | None]:
+    path = Path(path_str)
+    df = pd.read_csv(path)
     if df.empty:
-        return df, None, data_path
-
+        return df, None
     columns = list(df.columns)
-    date_col = _find_column(columns, [
-        "date",
-        "timestamp",
-        "datetime",
-        "created_at",
-        "createdat",
-    ])
+    date_col = _find_column(
+        columns,
+        [
+            "date",
+            "timestamp",
+            "datetime",
+            "created_at",
+            "createdat",
+        ],
+    )
     if date_col:
         df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
         df = df.sort_values(date_col)
+    return df, date_col
 
-    return df, date_col, data_path
+
+def load_data_from_dataset_value(dataset_value: str) -> tuple[pd.DataFrame | None, str | None, Path]:
+    path = resolve_dataset_path(dataset_value)
+    if not path.is_file():
+        return None, None, path
+    df, date_col = _load_csv_cached(str(path))
+    return df.copy(), date_col, path
 
 
 def analyze_sentiment(df):
     tweet_col = _find_column(
         list(df.columns),
-        ["tweet", "text", "full_text"],
+        ["tweet", "sentence", "text", "full_text"],
     )
     if not tweet_col:
         return df, None
 
-    ensure_nltk_data()
     df = df.copy()
     df["raw_tweet"] = df[tweet_col].astype(str)
     df["cleaned_tweet"] = df["raw_tweet"].apply(clean_text)
 
-    df["textblob_polarity"] = df["cleaned_tweet"].apply(
-        lambda text: TextBlob(text).sentiment.polarity
-    )
-    df["textblob_subjectivity"] = df["cleaned_tweet"].apply(
-        lambda text: TextBlob(text).sentiment.subjectivity
-    )
+    # Transformer-based sentiment (context aware).
+    # Fallback to TextBlob+VADER if transformers isn't installed.
+    try:
+        results = score_texts(df["cleaned_tweet"].tolist())
+        labels, scores, confs = zip(*results) if results else ([], [], [])
+        df["combined_sentiment_score"] = list(scores)
+        df["final_sentiment"] = list(labels)
+        df["transformer_confidence"] = list(confs)
+        # Keep these columns for existing charts, repurposed:
+        df["textblob_polarity"] = df["combined_sentiment_score"]
+        df["textblob_subjectivity"] = df["transformer_confidence"]
+        df["vader_compound"] = df["combined_sentiment_score"]
+    except Exception:
+        ensure_nltk_data()
+        df["textblob_polarity"] = df["cleaned_tweet"].apply(
+            lambda text: TextBlob(text).sentiment.polarity
+        )
+        df["textblob_subjectivity"] = df["cleaned_tweet"].apply(
+            lambda text: TextBlob(text).sentiment.subjectivity
+        )
 
-    sia = SentimentIntensityAnalyzer()
-    df["vader_compound"] = df["cleaned_tweet"].apply(
-        lambda text: sia.polarity_scores(text)["compound"]
-    )
-    df["combined_sentiment_score"] = (
-        df["textblob_polarity"] + df["vader_compound"]
-    ) / 2
-    df["final_sentiment"] = df["combined_sentiment_score"].apply(get_final_sentiment)
+        sia = SentimentIntensityAnalyzer()
+        df["vader_compound"] = df["cleaned_tweet"].apply(
+            lambda text: sia.polarity_scores(text)["compound"]
+        )
+        df["combined_sentiment_score"] = (
+            df["textblob_polarity"] + df["vader_compound"]
+        ) / 2
+        df["final_sentiment"] = df["combined_sentiment_score"].apply(get_final_sentiment)
     return df, tweet_col
+
+
+def _dataset_cache_key(dataset_value: str) -> tuple[str, int]:
+    """Cache key includes mtime to invalidate when file changes."""
+    path = resolve_dataset_path(dataset_value)
+    if not path.is_file():
+        return str(path), 0
+    return str(path.resolve()), path.stat().st_mtime_ns
+
+
+@lru_cache(maxsize=6)
+def _get_loaded_dataset_cached(path_str: str, mtime_ns: int):
+    """
+    Cached: load + column detection for a dataset file.
+    Sentiment is computed on-demand for the filtered subset.
+    """
+    path = Path(path_str)
+    df, date_col = _load_csv_cached(str(path))
+    df = df.copy()
+
+    columns = list(df.columns)
+    price_col = _find_column(columns, ["adj_close", "close", "last", "price"])
+    volume_col = _find_column(columns, ["volume", "vol"])
+    ticker_col = _find_column(columns, ["ticker", "symbol", "stock name", "stock", "company"])
+    tweet_col = _find_column(columns, ["tweet", "sentence", "text", "full_text"])
+    return {
+        "df": df,
+        "date_col": date_col,
+        "tweet_col": tweet_col,
+        "price_col": price_col,
+        "volume_col": volume_col,
+        "ticker_col": ticker_col,
+        "path": path,
+    }
+
+
+def get_enriched_dataset(dataset_value: str):
+    path_str, mtime_ns = _dataset_cache_key(dataset_value)
+    if mtime_ns == 0:
+        return None
+    return _get_loaded_dataset_cached(path_str, mtime_ns)
 
 
 def build_sentiment_chart(df):
@@ -426,55 +538,110 @@ def make_table(df, max_rows=10):
         style_table={"overflowX": "auto"},
     )
 
+def compute_dashboard(dataset_value: str, keyword: str):
+    """
+    Load the selected dataset, optionally filter by keyword, then compute all KPIs/figures/tables.
+    Returns a dict of values used by the layout/callback.
+    """
+    csv_filenames = discover_csv_filenames()
+    if not csv_filenames:
+        return {
+            "error": "No CSV files found.",
+            "active_path": None,
+            "ticker_value": "N/A",
+            "total_tweets": 0,
+            "sentiment_latest": None,
+            "positive_share": None,
+            "negative_share": None,
+            "price_fig": placeholder_figure("Price with Moving Averages", "No data"),
+            "volume_fig": placeholder_figure("Volume", "No data"),
+            "returns_fig": placeholder_figure("Returns", "No data", height=260),
+            "sentiment_fig": placeholder_figure("Sentiment Distribution", "No data"),
+            "polarity_fig": placeholder_figure("Combined Sentiment Score", "No data"),
+            "scatter_fig": placeholder_figure("Polarity vs Subjectivity", "No data"),
+            "top_terms_fig": placeholder_figure("Top Terms", "No data", height=360),
+            "timeline_fig": placeholder_figure("Daily Average Sentiment", "No data"),
+            "ticker_fig": placeholder_figure("Top Tickers", "No data"),
+            "top_ticker_table": pd.DataFrame(columns=["ticker", "tweets", "avg_sentiment", "positive_share", "negative_share"]),
+            "pos_table": pd.DataFrame(columns=["cleaned_tweet", "combined_sentiment_score"]),
+            "neg_table": pd.DataFrame(columns=["cleaned_tweet", "combined_sentiment_score"]),
+            "recent_table": pd.DataFrame(columns=["cleaned_tweet", "final_sentiment", "combined_sentiment_score"]),
+        }
 
-df, date_col, active_path = load_data()
+    default_dataset = dataset_value or ("stock_tweets.csv" if "stock_tweets.csv" in csv_filenames else csv_filenames[0])
+    enriched = get_enriched_dataset(default_dataset)
+    if not enriched:
+        return {
+            "error": f"Could not load dataset: {default_dataset}",
+            "active_path": resolve_dataset_path(default_dataset),
+            "ticker_value": "N/A",
+            "total_tweets": 0,
+            "sentiment_latest": None,
+            "positive_share": None,
+            "negative_share": None,
+            "price_fig": placeholder_figure("Price with Moving Averages", "No data"),
+            "volume_fig": placeholder_figure("Volume", "No data"),
+            "returns_fig": placeholder_figure("Returns", "No data", height=260),
+            "sentiment_fig": placeholder_figure("Sentiment Distribution", "No data"),
+            "polarity_fig": placeholder_figure("Combined Sentiment Score", "No data"),
+            "scatter_fig": placeholder_figure("Polarity vs Subjectivity", "No data"),
+            "top_terms_fig": placeholder_figure("Top Terms", "No data", height=360),
+            "timeline_fig": placeholder_figure("Daily Average Sentiment", "No data"),
+            "ticker_fig": placeholder_figure("Top Tickers", "No data"),
+            "top_ticker_table": pd.DataFrame(columns=["ticker", "tweets", "avg_sentiment", "positive_share", "negative_share"]),
+            "pos_table": pd.DataFrame(columns=["cleaned_tweet", "combined_sentiment_score"]),
+            "neg_table": pd.DataFrame(columns=["cleaned_tweet", "combined_sentiment_score"]),
+            "recent_table": pd.DataFrame(columns=["cleaned_tweet", "final_sentiment", "combined_sentiment_score"]),
+        }
 
-price_fig = placeholder_figure("Price with Moving Averages", "No price column found")
-volume_fig = placeholder_figure("Volume", "No volume column found")
-returns_fig = placeholder_figure("Returns", "No returns data", height=260)
-sentiment_fig = placeholder_figure("Sentiment Distribution", "No tweet column found")
-polarity_fig = placeholder_figure("Combined Sentiment Score", "No tweet column found")
-scatter_fig = placeholder_figure("Polarity vs Subjectivity", "No tweet column found")
-top_terms_fig = placeholder_figure("Top Terms", "No tweet column found", height=360)
-timeline_fig = placeholder_figure("Daily Average Sentiment", "No tweet column found")
-ticker_fig = placeholder_figure("Top Tickers", "No ticker data")
+    active_path = enriched["path"]
+    date_col = enriched["date_col"]
+    price_col = enriched["price_col"]
+    volume_col = enriched["volume_col"]
+    ticker_col = enriched["ticker_col"]
+    tweet_col = enriched["tweet_col"]
+    df = enriched["df"]
 
-ticker_value = "N/A"
-sentiment_latest = None
-last_return = None
-volatility = None
-total_tweets = 0
-avg_polarity = None
-avg_subjectivity = None
-positive_share = None
-negative_share = None
-top_ticker_table = pd.DataFrame(columns=["ticker", "tweets", "avg_sentiment", "positive_share", "negative_share"])
-pos_table = pd.DataFrame(columns=["cleaned_tweet", "combined_sentiment_score"])
-neg_table = pd.DataFrame(columns=["cleaned_tweet", "combined_sentiment_score"])
-recent_table = pd.DataFrame(columns=["cleaned_tweet", "final_sentiment", "combined_sentiment_score"])
+    sampled = False
+    if tweet_col and not df.empty:
+        if keyword:
+            mask = df[tweet_col].astype(str).str.contains(keyword, case=False, na=False)
+            df = df[mask].copy()
+        elif len(df) > MAX_ROWS_NO_KEYWORD:
+            # Presentation-friendly: keep first paint fast.
+            df = df.sample(n=MAX_ROWS_NO_KEYWORD, random_state=7).copy()
+            sampled = True
 
-if df is not None and not df.empty:
-    columns = list(df.columns)
-    price_col = _find_column(columns, [
-        "adj_close",
-        "close",
-        "last",
-        "price",
-    ])
-    volume_col = _find_column(columns, ["volume", "vol"])
-    ticker_col = _find_column(columns, ["ticker", "symbol", "stock name", "stock", "company"])
-
-    if ticker_col:
+    ticker_value = "N/A"
+    if ticker_col and not df.empty:
         ticker_series = df[ticker_col].dropna()
         if not ticker_series.empty:
             ticker_value = str(ticker_series.mode().iloc[0])
 
-    df, tweet_col = analyze_sentiment(df)
-    if tweet_col:
+    price_fig = placeholder_figure("Price with Moving Averages", "No price column found")
+    volume_fig = placeholder_figure("Volume", "No volume column found")
+    returns_fig = placeholder_figure("Returns", "No returns data", height=260)
+    sentiment_fig = placeholder_figure("Sentiment Distribution", "No tweet column found")
+    polarity_fig = placeholder_figure("Combined Sentiment Score", "No tweet column found")
+    scatter_fig = placeholder_figure("Polarity vs Subjectivity", "No tweet column found")
+    top_terms_fig = placeholder_figure("Top Terms", "No tweet column found", height=360)
+    timeline_fig = placeholder_figure("Daily Average Sentiment", "No tweet column found")
+    ticker_fig = placeholder_figure("Top Tickers", "No ticker data")
+
+    sentiment_latest = None
+    total_tweets = 0
+    positive_share = None
+    negative_share = None
+    top_ticker_table = pd.DataFrame(columns=["ticker", "tweets", "avg_sentiment", "positive_share", "negative_share"])
+    pos_table = pd.DataFrame(columns=["cleaned_tweet", "combined_sentiment_score"])
+    neg_table = pd.DataFrame(columns=["cleaned_tweet", "combined_sentiment_score"])
+    recent_table = pd.DataFrame(columns=["cleaned_tweet", "final_sentiment", "combined_sentiment_score"])
+
+    if not df.empty and tweet_col:
+        df, tweet_col_after = analyze_sentiment(df)
+        tweet_col = tweet_col_after or tweet_col
         sentiment_latest = df["combined_sentiment_score"].dropna().iloc[-1] if not df.empty else None
         total_tweets = len(df)
-        avg_polarity = df["textblob_polarity"].mean()
-        avg_subjectivity = df["textblob_subjectivity"].mean()
         positive_share = (df["final_sentiment"] == "Positive").mean()
         negative_share = (df["final_sentiment"] == "Negative").mean()
 
@@ -489,43 +656,68 @@ if df is not None and not df.empty:
 
         pos_table, neg_table, recent_table = build_tweet_tables(df, date_col)
 
-    daily_df = pd.DataFrame()
-    if date_col:
-        daily_df = (
-            df.dropna(subset=[date_col])
-            .groupby(pd.Grouper(key=date_col, freq="D"))
-            .agg(
-                tweet_count=(ticker_col if ticker_col else df.columns[0], "size"),
-                avg_sentiment=("combined_sentiment_score", "mean"),
+        daily_df = pd.DataFrame()
+        if date_col:
+            daily_df = (
+                df.dropna(subset=[date_col])
+                .groupby(pd.Grouper(key=date_col, freq="D"))
+                .agg(
+                    tweet_count=(ticker_col if ticker_col else df.columns[0], "size"),
+                    avg_sentiment=("combined_sentiment_score", "mean"),
+                )
+                .reset_index()
             )
-            .reset_index()
-        )
-        daily_df = daily_df.rename(columns={date_col: "date"})
-        daily_df["sentiment_change"] = daily_df["avg_sentiment"].diff()
+            daily_df = daily_df.rename(columns={date_col: "date"})
+            daily_df["sentiment_change"] = daily_df["avg_sentiment"].diff()
 
-    if price_col:
-        df[price_col] = pd.to_numeric(df[price_col], errors="coerce")
-        for window in MA_WINDOWS:
-            df[f"MA{window}"] = df[price_col].rolling(window=window).mean()
+        if price_col:
+            df[price_col] = pd.to_numeric(df[price_col], errors="coerce")
+            for window in MA_WINDOWS:
+                df[f"MA{window}"] = df[price_col].rolling(window=window).mean()
 
-        returns_col = "returns"
-        df[returns_col] = df[price_col].pct_change()
-        returns_clean = df[returns_col].dropna()
-        if not returns_clean.empty:
-            last_return = returns_clean.iloc[-1]
-            volatility = returns_clean.tail(30).std()
+            returns_col = "returns"
+            df[returns_col] = df[price_col].pct_change()
 
-        price_fig = build_price_figure(df, date_col, price_col, "combined_sentiment_score")
-        returns_fig = build_returns_figure(df, date_col, returns_col)
-    elif not daily_df.empty:
-        price_fig = build_tweet_activity_figure(daily_df)
-        returns_fig = build_sentiment_change_figure(daily_df)
+            price_fig = build_price_figure(df, date_col, price_col, "combined_sentiment_score")
+            returns_fig = build_returns_figure(df, date_col, returns_col)
+        elif not daily_df.empty:
+            price_fig = build_tweet_activity_figure(daily_df)
+            returns_fig = build_sentiment_change_figure(daily_df)
 
-    if volume_col:
-        df[volume_col] = pd.to_numeric(df[volume_col], errors="coerce")
-        volume_fig = build_volume_figure(df, date_col, volume_col)
-    elif not daily_df.empty:
-        volume_fig = build_tweet_volume_figure(daily_df)
+        if volume_col:
+            df[volume_col] = pd.to_numeric(df[volume_col], errors="coerce")
+            volume_fig = build_volume_figure(df, date_col, volume_col)
+        elif not daily_df.empty:
+            volume_fig = build_tweet_volume_figure(daily_df)
+
+    return {
+        "error": "",
+        "sampled": sampled,
+        "active_path": active_path,
+        "ticker_value": ticker_value,
+        "total_tweets": total_tweets,
+        "sentiment_latest": sentiment_latest,
+        "positive_share": positive_share,
+        "negative_share": negative_share,
+        "price_fig": price_fig,
+        "volume_fig": volume_fig,
+        "returns_fig": returns_fig,
+        "sentiment_fig": sentiment_fig,
+        "polarity_fig": polarity_fig,
+        "scatter_fig": scatter_fig,
+        "top_terms_fig": top_terms_fig,
+        "timeline_fig": timeline_fig,
+        "ticker_fig": ticker_fig,
+        "top_ticker_table": top_ticker_table,
+        "pos_table": pos_table,
+        "neg_table": neg_table,
+        "recent_table": recent_table,
+    }
+
+
+_csv_names = discover_csv_filenames()
+_csv_default = "stock_tweets.csv" if "stock_tweets.csv" in _csv_names else (_csv_names[0] if _csv_names else "")
+_initial = compute_dashboard(_csv_default, "")
 
 
 app = dash.Dash(
@@ -621,79 +813,156 @@ app.layout = dbc.Container(
                     dbc.Col(
                         html.Div(
                             [
-                                html.Div("Twitter Stock Sentiment", className="nav-pill mb-3"),
-                                html.H2("Portfolio Sentiment Dashboard", className="fw-bold"),
+                                html.H2("CT Sentiment Analyzer", className="fw-bold mb-1"),
                                 html.P(
                                     "Market mood, tweet-driven signals, and stock comparisons.",
-                                    className="text-muted",
+                                    className="text-muted mb-0",
                                 ),
-                                html.Div("Overview", className="fw-semibold mt-4"),
+                            ]
+                        ),
+                        md=12,
+                    ),
+                ],
+                className="g-3 align-items-end mb-2",
+            ),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        dbc.Card(
+                            dbc.CardBody(
+                                [
+                                    dbc.Row(
+                                        [
+                                            dbc.Col(
+                                                [
+                                                    html.Div("Dataset", className="text-muted small mb-1"),
+                                                    dcc.Dropdown(
+                                                        id="dataset-select",
+                                                        options=dataset_dropdown_options(_csv_names),
+                                                        value=_csv_default or None,
+                                                        clearable=False,
+                                                    ),
+                                                ],
+                                                md=12,
+                                                lg=5,
+                                            ),
+                                            dbc.Col(
+                                                [
+                                                    html.Div("Keyword", className="text-muted small mb-1"),
+                                                    dbc.Input(
+                                                        id="keyword-input",
+                                                        type="text",
+                                                        placeholder="Type a keyword (optional)",
+                                                        value="",
+                                                    ),
+                                                ],
+                                                md=12,
+                                                lg=4,
+                                            ),
+                                            dbc.Col(
+                                                dbc.Button(
+                                                    "Run",
+                                                    id="run-btn",
+                                                    color="primary",
+                                                    className="w-100 mt-4",
+                                                ),
+                                                md=6,
+                                                lg=2,
+                                            ),
+                                        ],
+                                        className="g-2",
+                                    ),
+                                    html.Div(id="status-message", className="text-muted small mt-2"),
+                                ]
+                            ),
+                            className="kpi-card",
+                        ),
+                        md=12,
+                    )
+                ],
+                className="g-3 mb-3",
+            ),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        html.Div(
+                            [
+                                html.Div("Overview", className="fw-semibold"),
                                 html.Div("Compare", className="text-muted"),
                                 html.Div("Tweets", className="text-muted"),
                                 html.Hr(),
                                 html.Div("Primary Ticker", className="text-muted"),
-                                html.H4(ticker_value, className="fw-bold"),
+                                html.H4(_initial["ticker_value"], id="primary-ticker", className="fw-bold"),
                                 html.Div(
-                                    f"Source: {(active_path.name if active_path else 'stock_tweets.csv')}",
+                                    f"Source: {(_initial['active_path'].name if _initial['active_path'] else (_csv_default or 'N/A'))}",
+                                    id="source-label",
                                     className="text-muted mt-3",
                                 ),
                             ],
                             className="sidebar",
                         ),
-                        md=3,
+                        md=12,
+                        lg=3,
                     ),
                     dbc.Col(
-                        html.Div(
-                            [
-                                dbc.Row(
+                        dcc.Loading(
+                            type="default",
+                            color="#2563EB",
+                            children=html.Div(
+                                [
+                                    dbc.Row(
                                     [
                                         dbc.Col(
                                             dbc.Card(
                                                 dbc.CardBody(
                                                     [
                                                         html.Div("Total Tweets", className="kpi-label"),
-                                                        html.Div(total_tweets, className="kpi-value"),
+                                                        html.Div(_initial["total_tweets"], id="kpi-total", className="kpi-value"),
                                                     ]
                                                 ),
                                                 className="kpi-card",
                                             ),
-                                            md=3,
+                                            md=6,
+                                            lg=3,
                                         ),
                                         dbc.Col(
                                             dbc.Card(
                                                 dbc.CardBody(
                                                     [
                                                         html.Div("Avg Sentiment", className="kpi-label"),
-                                                        html.Div(_format_number(sentiment_latest), className="kpi-value"),
+                                                        html.Div(_format_number(_initial["sentiment_latest"]), id="kpi-avg", className="kpi-value"),
                                                     ]
                                                 ),
                                                 className="kpi-card",
                                             ),
-                                            md=3,
+                                            md=6,
+                                            lg=3,
                                         ),
                                         dbc.Col(
                                             dbc.Card(
                                                 dbc.CardBody(
                                                     [
                                                         html.Div("Positive Share", className="kpi-label"),
-                                                        html.Div(_format_percent(positive_share), className="kpi-value"),
+                                                        html.Div(_format_percent(_initial["positive_share"]), id="kpi-pos", className="kpi-value"),
                                                     ]
                                                 ),
                                                 className="kpi-card",
                                             ),
-                                            md=3,
+                                            md=6,
+                                            lg=3,
                                         ),
                                         dbc.Col(
                                             dbc.Card(
                                                 dbc.CardBody(
                                                     [
                                                         html.Div("Negative Share", className="kpi-label"),
-                                                        html.Div(_format_percent(negative_share), className="kpi-value"),
+                                                        html.Div(_format_percent(_initial["negative_share"]), id="kpi-neg", className="kpi-value"),
                                                     ]
                                                 ),
                                                 className="kpi-card",
                                             ),
-                                            md=3,
+                                            md=6,
+                                            lg=3,
                                         ),
                                     ],
                                     className="g-3",
@@ -705,16 +974,16 @@ app.layout = dbc.Container(
                                                 [
                                                     dbc.Row(
                                                         [
-                                                            dbc.Col(dcc.Graph(figure=timeline_fig), md=8),
-                                                            dbc.Col(dcc.Graph(figure=sentiment_fig), md=4),
+                                                            dbc.Col(dcc.Graph(id="timeline-graph", figure=_initial["timeline_fig"]), md=8),
+                                                            dbc.Col(dcc.Graph(id="sentiment-graph", figure=_initial["sentiment_fig"]), md=4),
                                                         ],
                                                         className="g-3 mt-2",
                                                     ),
                                                     dbc.Row(
                                                         [
-                                                            dbc.Col(dcc.Graph(figure=polarity_fig), md=4),
-                                                            dbc.Col(dcc.Graph(figure=scatter_fig), md=4),
-                                                            dbc.Col(dcc.Graph(figure=top_terms_fig), md=4),
+                                                            dbc.Col(dcc.Graph(id="polarity-graph", figure=_initial["polarity_fig"]), md=4),
+                                                            dbc.Col(dcc.Graph(id="scatter-graph", figure=_initial["scatter_fig"]), md=4),
+                                                            dbc.Col(dcc.Graph(id="terms-graph", figure=_initial["top_terms_fig"]), md=4),
                                                         ],
                                                         className="g-3 mt-2",
                                                     ),
@@ -724,14 +993,17 @@ app.layout = dbc.Container(
                                                                 html.Div(
                                                                     [
                                                                         html.H5("Recent Tweets", className="fw-semibold"),
-                                                                        make_table(
-                                                                            recent_table[[
-                                                                                "cleaned_tweet",
-                                                                                "final_sentiment",
-                                                                                "combined_sentiment_score",
-                                                                            ]],
-                                                                            max_rows=10,
-                                                                        ),
+                                                                        html.Div(
+                                                                            id="recent-table",
+                                                                            children=make_table(
+                                                                                _initial["recent_table"][[
+                                                                                    "cleaned_tweet",
+                                                                                    "final_sentiment",
+                                                                                    "combined_sentiment_score",
+                                                                                ]],
+                                                                                max_rows=10,
+                                                                            ),
+                                                                        )
                                                                     ],
                                                                     className="panel-card",
                                                                 ),
@@ -750,15 +1022,15 @@ app.layout = dbc.Container(
                                                 [
                                                     dbc.Row(
                                                         [
-                                                            dbc.Col(dcc.Graph(figure=price_fig), md=7),
-                                                            dbc.Col(dcc.Graph(figure=volume_fig), md=5),
+                                                            dbc.Col(dcc.Graph(id="price-graph", figure=_initial["price_fig"]), md=7),
+                                                            dbc.Col(dcc.Graph(id="volume-graph", figure=_initial["volume_fig"]), md=5),
                                                         ],
                                                         className="g-3 mt-2",
                                                     ),
                                                     dbc.Row(
                                                         [
-                                                            dbc.Col(dcc.Graph(figure=returns_fig), md=7),
-                                                            dbc.Col(dcc.Graph(figure=ticker_fig), md=5),
+                                                            dbc.Col(dcc.Graph(id="returns-graph", figure=_initial["returns_fig"]), md=7),
+                                                            dbc.Col(dcc.Graph(id="ticker-graph", figure=_initial["ticker_fig"]), md=5),
                                                         ],
                                                         className="g-3 mt-2",
                                                     ),
@@ -768,7 +1040,10 @@ app.layout = dbc.Container(
                                                                 html.Div(
                                                                     [
                                                                         html.H5("Top Ticker Comparison", className="fw-semibold"),
-                                                                        make_table(top_ticker_table, max_rows=5),
+                                                                        html.Div(
+                                                                            id="top-ticker-table",
+                                                                            children=make_table(_initial["top_ticker_table"], max_rows=5),
+                                                                        ),
                                                                     ],
                                                                     className="panel-card",
                                                                 ),
@@ -790,10 +1065,13 @@ app.layout = dbc.Container(
                                                                 html.Div(
                                                                     [
                                                                         html.H5("Top Positive Tweets", className="fw-semibold"),
-                                                                        make_table(
-                                                                            pos_table[["cleaned_tweet", "combined_sentiment_score"]],
-                                                                            max_rows=8,
-                                                                        ),
+                                                                        html.Div(
+                                                                            id="pos-table",
+                                                                            children=make_table(
+                                                                                _initial["pos_table"][["cleaned_tweet", "combined_sentiment_score"]],
+                                                                                max_rows=8,
+                                                                            ),
+                                                                        )
                                                                     ],
                                                                     className="panel-card",
                                                                 ),
@@ -803,10 +1081,13 @@ app.layout = dbc.Container(
                                                                 html.Div(
                                                                     [
                                                                         html.H5("Top Negative Tweets", className="fw-semibold"),
-                                                                        make_table(
-                                                                            neg_table[["cleaned_tweet", "combined_sentiment_score"]],
-                                                                            max_rows=8,
-                                                                        ),
+                                                                        html.Div(
+                                                                            id="neg-table",
+                                                                            children=make_table(
+                                                                                _initial["neg_table"][["cleaned_tweet", "combined_sentiment_score"]],
+                                                                                max_rows=8,
+                                                                            ),
+                                                                        )
                                                                     ],
                                                                     className="panel-card",
                                                                 ),
@@ -840,9 +1121,11 @@ app.layout = dbc.Container(
                                     ],
                                     className="mt-3",
                                 ),
-                            ]
+                                ]
+                            ),
                         ),
-                        md=9,
+                        md=12,
+                        lg=9,
                     ),
                 ],
                 className="g-3",
@@ -852,6 +1135,76 @@ app.layout = dbc.Container(
     ),
     fluid=True,
 )
+
+
+@app.callback(
+    [
+        Output("status-message", "children"),
+        Output("primary-ticker", "children"),
+        Output("source-label", "children"),
+        Output("kpi-total", "children"),
+        Output("kpi-avg", "children"),
+        Output("kpi-pos", "children"),
+        Output("kpi-neg", "children"),
+        Output("timeline-graph", "figure"),
+        Output("sentiment-graph", "figure"),
+        Output("polarity-graph", "figure"),
+        Output("scatter-graph", "figure"),
+        Output("terms-graph", "figure"),
+        Output("recent-table", "children"),
+        Output("price-graph", "figure"),
+        Output("volume-graph", "figure"),
+        Output("returns-graph", "figure"),
+        Output("ticker-graph", "figure"),
+        Output("top-ticker-table", "children"),
+        Output("pos-table", "children"),
+        Output("neg-table", "children"),
+    ],
+    [Input("run-btn", "n_clicks"), Input("dataset-select", "value")],
+    [State("dataset-select", "value"), State("keyword-input", "value")],
+    prevent_initial_call=False,
+)
+def _run_analysis(_n_clicks, dataset_change_value, dataset_value, keyword_value):
+    dataset_value = (dataset_value or "").strip()
+    keyword_value = (keyword_value or "").strip()
+    out = compute_dashboard(dataset_value, keyword_value)
+
+    active_path = out.get("active_path")
+    source = f"Source: {(active_path.name if active_path else (dataset_value or _csv_default or 'N/A'))}"
+    if out.get("error"):
+        status = out["error"]
+    else:
+        status = f"Showing {out['total_tweets']:,} rows"
+        if out.get("sampled") and not keyword_value:
+            status += f" (sampled to {MAX_ROWS_NO_KEYWORD:,} for speed — add a keyword for full filtering)"
+        elif keyword_value:
+            status += f" matching “{keyword_value}”"
+
+    return (
+        status,
+        out["ticker_value"],
+        source,
+        out["total_tweets"],
+        _format_number(out["sentiment_latest"]),
+        _format_percent(out["positive_share"]),
+        _format_percent(out["negative_share"]),
+        out["timeline_fig"],
+        out["sentiment_fig"],
+        out["polarity_fig"],
+        out["scatter_fig"],
+        out["top_terms_fig"],
+        make_table(
+            out["recent_table"][["cleaned_tweet", "final_sentiment", "combined_sentiment_score"]],
+            max_rows=10,
+        ),
+        out["price_fig"],
+        out["volume_fig"],
+        out["returns_fig"],
+        out["ticker_fig"],
+        make_table(out["top_ticker_table"], max_rows=5),
+        make_table(out["pos_table"][["cleaned_tweet", "combined_sentiment_score"]], max_rows=8),
+        make_table(out["neg_table"][["cleaned_tweet", "combined_sentiment_score"]], max_rows=8),
+    )
 
 
 if __name__ == "__main__":

@@ -5,3 +5,5 @@ plotly
 nltk
 textblob
 scikit-learn
+transformers
+torch
